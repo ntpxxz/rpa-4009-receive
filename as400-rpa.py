@@ -59,7 +59,7 @@ PBASMT_SECTION_CODE = os.getenv("PBASMT_SECTION_CODE", "71DM")  # ponytail: fixe
 SKIP_LOGIN = os.getenv("SKIP_LOGIN", "false").lower() == "true"
 
 PCOMM_EXE        = os.getenv("PCOMM_EXE", r"C:\Program Files (x86)\IBM\Client Access\Emulator\pcsws.exe")
-PCOMM_WORKSPACE  = os.getenv("PCOMM_WORKSPACE", "")   # path to .pws workspace file
+PCOMM_ARGS       = os.getenv("PCOMM_ARGS", "").split()  # args ต่อท้าย pcsws.exe เช่น "PBFD5YD1 A35BP"
 PCOMM_START_WAIT = int(os.getenv("PCOMM_START_WAIT", "15"))  # seconds to wait for session after launch
 
 # knobs (row/col based — เสถียรกว่า pixel/tab เดิม) ปรับใน .env ได้ไม่ต้อง build
@@ -166,9 +166,7 @@ def launch_terminal():
     if not os.path.exists(PCOMM_EXE):
         log.error("ไม่พบ PCOMM_EXE=%s — เปิด PC5250 เองก่อนรัน", PCOMM_EXE)
         return
-    cmd = [PCOMM_EXE]
-    if PCOMM_WORKSPACE:
-        cmd.append(PCOMM_WORKSPACE)
+    cmd = [PCOMM_EXE] + PCOMM_ARGS
     log.info("เปิด PC5250: %s", " ".join(cmd))
     subprocess.Popen(cmd)
     for _ in range(PCOMM_START_WAIT * 2):
