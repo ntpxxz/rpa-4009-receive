@@ -23,6 +23,7 @@ load_dotenv(os.path.join(_base, ".env"), override=True)
 _log_dir = os.path.join(_base, "logs")
 os.makedirs(_log_dir, exist_ok=True)
 _fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
 _fh = logging.handlers.RotatingFileHandler(
     os.path.join(_log_dir, "as400-rpa.log"), maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
 _fh.setFormatter(_fmt)
@@ -30,6 +31,15 @@ _sh = logging.StreamHandler()
 _sh.setFormatter(_fmt)
 logging.basicConfig(level=logging.INFO, handlers=[_fh, _sh])
 log = logging.getLogger("as400-rpa-ehllapi")
+
+# Activity log — one line per record event; readable by supervisor without technical noise
+_afh = logging.handlers.RotatingFileHandler(
+    os.path.join(_log_dir, "activity.log"), maxBytes=5*1024*1024, backupCount=10, encoding="utf-8")
+_afh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+alog = logging.getLogger("as400-rpa.activity")
+alog.setLevel(logging.INFO)
+alog.addHandler(_afh)
+alog.propagate = False
 
 # ─── config ──────────────────────────────────────────────────────────────────
 DB_SERVER   = os.getenv("DB_SERVER", "localhost")
@@ -69,18 +79,31 @@ CONFIRM_TIMEOUT_SEC          = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
 _DB_CONN_STR = (f"DRIVER={{ODBC Driver 17 for SQL Server}};"
                 f"SERVER={DB_SERVER};DATABASE={DB_NAME};UID={DB_USER};PWD={DB_PASSWORD}")
 
-_db_conn = None
+_db_conn       = None
+_db_connected  = False  # track first connect vs reconnect
 
 def _get_db():
-    global _db_conn
+    global _db_conn, _db_connected
     try:
         if _db_conn:
             _db_conn.execute("SELECT 1")
             return _db_conn
     except Exception:
-        log.warning("DB connection lost — reconnecting")
-    _db_conn = pyodbc.connect(_DB_CONN_STR, autocommit=False)
-    log.info("DB connected: %s / %s", DB_SERVER, DB_NAME)
+        log.warning("DB connection lost — reconnecting to %s/%s", DB_SERVER, DB_NAME)
+        _db_connected = False
+    try:
+        _db_conn = pyodbc.connect(_DB_CONN_STR, autocommit=False)
+    except Exception as e:
+        log.error("DB connect failed: %s/%s — %s", DB_SERVER, DB_NAME, e)
+        alog.error("DB_FAIL  %s/%s — %s", DB_SERVER, DB_NAME, e)
+        raise
+    if not _db_connected:
+        log.info("DB connected: %s / %s  user=%s", DB_SERVER, DB_NAME, DB_USER)
+        alog.info("DB_CONN  %s/%s  user=%s", DB_SERVER, DB_NAME, DB_USER)
+        _db_connected = True
+    else:
+        log.warning("DB reconnected: %s / %s", DB_SERVER, DB_NAME)
+        alog.warning("DB_RECONN  %s/%s", DB_SERVER, DB_NAME)
     return _db_conn
 
 def fetch_pending():
@@ -419,16 +442,23 @@ def process_record(record):
         input_to_as400(record)
         if not DTN07122_CONFIRM_MODE:
             mark_done(record["id"], "SENT")
+        elapsed = time.time() - t0
         log.info("✓ SENT id=%-4s [%-8s] %s %s  (%.1fs)",
-                 record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), time.time() - t0)
+                 record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), elapsed)
+        alog.info("SENT   id=%-4s vendor=%-8s item=%-15s matlot=%-15s qty=%s  %.1fs",
+                  record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"),
+                  record.get("STOCK_QTY"), elapsed)
         if DTN07122_DRY_RUN:
             _f1_to_mht53201()
     except DryRunStop as e:
         log.info("⏸ id=%s %s (ยังค้าง PENDING)", record["id"], e)
         _f1_to_mht53201()
     except Exception as e:
+        elapsed = time.time() - t0
         log.error("✗ FAIL id=%-4s [%-8s] %s — %s  (%.1fs)",
-                  record["id"], label, record.get("ITEM_NO"), e, time.time() - t0)
+                  record["id"], label, record.get("ITEM_NO"), e, elapsed)
+        alog.error("FAIL   id=%-4s vendor=%-8s item=%-15s matlot=%-15s error=%s  %.1fs",
+                   record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), e, elapsed)
         try:
             SS.reset()
         except Exception:
@@ -463,6 +493,8 @@ def main():
     log.info("  Session : %s   Poll: %ds   SKIP_LOGIN: %s", SESSION_ID, POLL_INTERVAL, SKIP_LOGIN)
     log.info("  DRY_RUN : %s   CONFIRM_MODE: %s", DTN07122_DRY_RUN, DTN07122_CONFIRM_MODE)
     log.info("=" * 56)
+    alog.info("START  session=%s db=%s/%s skip_login=%s dry_run=%s confirm_mode=%s",
+              SESSION_ID, DB_SERVER, DB_NAME, SKIP_LOGIN, DTN07122_DRY_RUN, DTN07122_CONFIRM_MODE)
     launch_terminal()
     signed_in = False
     while True:
@@ -476,6 +508,7 @@ def main():
                 poll()
         except KeyboardInterrupt:
             log.info("Stopped")
+            alog.info("STOP   (KeyboardInterrupt)")
             break
         except Exception as e:
             log.error("Loop error: %s", e, exc_info=True)
