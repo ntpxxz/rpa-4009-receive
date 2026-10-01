@@ -45,12 +45,13 @@ PBASMT_USER   = os.getenv("PBASMT_USER", "")
 PBASMT_PASS   = os.getenv("PBASMT_PASS", "")
 AS400_MENU_OPTION   = os.getenv("AS400_MENU_OPTION", "")
 PBASMT_CHECK_PASS   = os.getenv("PBASMT_CHECK_PASS", "")
-PBASMT_SECTION_CODE = os.getenv("PBASMT_SECTION_CODE", "")
+PBASMT_SECTION_CODE = os.getenv("PBASMT_SECTION_CODE", "71DM")  # ponytail: fixed value, override via .env if needed
 SKIP_LOGIN = os.getenv("SKIP_LOGIN", "false").lower() == "true"
 
 # knobs (row/col based — เสถียรกว่า pixel/tab เดิม) ปรับใน .env ได้ไม่ต้อง build
 DTN07122_KGS_TO_VNAME_GAP = int(os.getenv("DTN07122_KGS_TO_VNAME_GAP", "1"))  # cols ถัดจาก KGS ถึงช่อง VENDOR_NAME
 MHT53202_OPT_COL          = int(os.getenv("MHT53202_OPT_COL", "2"))           # คอลัมน์ OPT (ซ้ายสุดของแถว D/O)
+MHT53205_OPT_COL          = int(os.getenv("MHT53205_OPT_COL", "2"))           # คอลัมน์ OPT บนหน้า MHT53205 (จูนกับจอจริง)
 WAIT_TIMEOUT              = float(os.getenv("WAIT_TIMEOUT", "8"))
 # เทสต์ DTN07122: กรอกครบแล้วหยุดก่อน Enter ยืนยัน (ตรวจ field ก่อน) / หน่วงกี่วิก่อน confirm
 DTN07122_STOP_BEFORE_CONFIRM = os.getenv("DTN07122_STOP_BEFORE_CONFIRM", "false").lower() == "true"
@@ -144,6 +145,7 @@ def ensure_signed_in():
     screen_pbasmt_login()
     navigate_menu()
     screen_password_check()
+    screen_mht53205_barcode_entry()
 
 def screen_signon():
     if not SS.contains("Sign On"):
@@ -156,7 +158,7 @@ def screen_signon():
     SS.wait()
 
 def screen_pbasmt_login():
-    if not SS.contains("USER ID"):
+    if not SS.contains("XDP05301"):
         return
     if not (PBASMT_USER and PBASMT_PASS):
         log.warning("→ PBASMT: ไม่มี PBASMT_USER/PASS ใน .env — ข้าม")
@@ -166,13 +168,18 @@ def screen_pbasmt_login():
     SS.wait()
 
 def navigate_menu():
+    if not AS400_MENU_OPTION:
+        return
+    if not SS.contains("TPBAS00W1"):
+        log.warning("→ Menu: ไม่พบ TPBAS00W1 บนหน้าจอ — ข้าม")
+        return
     for step in filter(None, AS400_MENU_OPTION.split("-")):
         SS.send(step); SS.enter()
         log.info("→ Menu: %s", step)
         SS.wait()
 
 def screen_password_check():
-    if not SS.contains("PASSWORD CHECK"):
+    if not SS.contains("XDP05001"):
         return
     if not PBASMT_CHECK_PASS:
         log.warning("→ PASSWORD CHECK: ไม่มี PBASMT_CHECK_PASS — ข้าม")
@@ -184,6 +191,20 @@ def screen_password_check():
     SS.enter()
     log.info("→ PASSWORD CHECK: section=%s", PBASMT_SECTION_CODE)
     SS.wait()
+
+# ─── Screen 0: MHT53205 — เลือก BARCODE WITHOUT MAT LOT ──────────────────────
+def screen_mht53205_barcode_entry():
+    if not SS.contains("MHT53205"):
+        return
+    pos = SS.find("BARCODE")
+    if not pos:
+        raise ValueError("MHT53205: หา 'BARCODE' บนหน้าจอไม่เจอ")
+    row, _ = pos
+    SS.goto(row, MHT53205_OPT_COL)
+    SS.enter()
+    log.info("→ MHT53205: เลือก BARCODE WITHOUT MAT LOT แถว %d", row)
+    if not SS.wait_for("MHT53201", WAIT_TIMEOUT):
+        raise ValueError("MHT53205: ไม่ขึ้นหน้า MHT53201 — ตรวจ OPT column (MHT53205_OPT_COL)")
 
 # ─── Screen 1: MHT53201 — กรอก vendor code ────────────────────────────────────
 def screen_mht53201_input_vendor(vendor_code):
