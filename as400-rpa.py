@@ -75,11 +75,12 @@ def _get_db():
     global _db_conn
     try:
         if _db_conn:
-            _db_conn.execute("SELECT 1")  # ping
+            _db_conn.execute("SELECT 1")
             return _db_conn
     except Exception:
-        pass
+        log.warning("DB connection lost — reconnecting")
     _db_conn = pyodbc.connect(_DB_CONN_STR, autocommit=False)
+    log.info("DB connected: %s / %s", DB_SERVER, DB_NAME)
     return _db_conn
 
 def fetch_pending():
@@ -114,20 +115,25 @@ def get_queue_status(record_id):
     return row[0] if row else "FAILED"
 
 # ─── EHLLAPI session (global) ─────────────────────────────────────────────────
-SS = None   # ehllapi.Session
+SS = None        # ehllapi.Session
+_last_sid = None # track session state to suppress repeated log lines
 
 def connect_session():
     """คืน True ถ้าต่อ session 5250 ได้ (เปิดจอ + sign-in ไว้แล้ว)"""
-    global SS
+    global SS, _last_sid
     if SS is None:
         SS = ehllapi.Session()
         log.info("EHLLAPI dll: %s", SS.dll_path)
     try:
         sid = SS.connect_any(prefer=SESSION_ID)
-        log.info("connected session '%s' (%dx%d)", sid, SS.rows, SS.cols)
+        if sid != _last_sid:
+            log.info("EHLLAPI session '%s' connected (%dx%d)", sid, SS.rows, SS.cols)
+            _last_sid = sid
         return True
     except ehllapi.EHLLAPIError as e:
-        log.warning("%s", e)
+        if _last_sid is not None:
+            log.warning("EHLLAPI session lost: %s", e)
+            _last_sid = None
         return False
 
 def launch_terminal():
@@ -385,7 +391,6 @@ def _f1_to_mht53201():
 
 def _back_to_mht53201(max_tries=6):
     """Reset แล้ว F1 ซ้ำจนเห็น MHT53201 — ไม่กด Enter ก่อน (Enter บน DTN07122 จะ submit)"""
-    import time
     for i in range(max_tries):
         try:
             scr = SS.read().upper()
@@ -406,40 +411,58 @@ def _back_to_mht53201(max_tries=6):
     return False
 
 def process_record(record):
+    label = record.get("shortname") or record.get("VENDOR_CODE", "?")
+    log.info("► id=%-4s [%-8s] item=%-15s matlot=%s",
+             record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"))
+    t0 = time.time()
     try:
         input_to_as400(record)
         if not DTN07122_CONFIRM_MODE:
             mark_done(record["id"], "SENT")
-        sname_ok = record.get("shortname") or ""
-        log.info("✓ SENT: [%s] %s %s", sname_ok or record["VENDOR_CODE"], record["ITEM_NO"], record["MATLOT"])
+        log.info("✓ SENT id=%-4s [%-8s] %s %s  (%.1fs)",
+                 record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), time.time() - t0)
         if DTN07122_DRY_RUN:
             _f1_to_mht53201()
     except DryRunStop as e:
-        log.info("⏸ %s (record %s ยังค้าง PENDING)", e, record["id"])
+        log.info("⏸ id=%s %s (ยังค้าง PENDING)", record["id"], e)
         _f1_to_mht53201()
     except Exception as e:
-        log.error("✗ ERROR: [%s] %s — %s", record.get("shortname") or record.get("VENDOR_CODE"), record.get("ITEM_NO"), e)
+        log.error("✗ FAIL id=%-4s [%-8s] %s — %s  (%.1fs)",
+                  record["id"], label, record.get("ITEM_NO"), e, time.time() - t0)
         try:
             SS.reset()
         except Exception:
             pass
         mark_done(record["id"], "FAILED", str(e))
-        _back_to_mht53201()   # คืนจอไป MHT53201 ให้ใบถัดไปรันได้
+        _back_to_mht53201()
+
+_had_pending = False
 
 def poll():
+    global _had_pending
     pending = fetch_pending()
     if not pending:
-        log.info("No pending records")
+        if _had_pending:
+            log.info("Queue empty")
+            _had_pending = False
         return
-    log.info("Found %d pending records", len(pending))
-    for record in pending:
+    if not _had_pending:
+        _had_pending = True
+    log.info("Queue: %d pending", len(pending))
+    for i, record in enumerate(pending, 1):
+        log.info("─── %d/%d ─────────────────────────────", i, len(pending))
         process_record(record)
 
 def main():
     for st in (sys.stdout, sys.stderr):
         try: st.reconfigure(encoding="utf-8", errors="replace")
         except Exception: pass
-    log.info("EHLLAPI RPA — polling every %ds (Ctrl-C to stop)", POLL_INTERVAL)
+    log.info("=" * 56)
+    log.info("AS400 RPA (EHLLAPI) starting")
+    log.info("  DB      : %s / %s  user=%s", DB_SERVER, DB_NAME, DB_USER)
+    log.info("  Session : %s   Poll: %ds   SKIP_LOGIN: %s", SESSION_ID, POLL_INTERVAL, SKIP_LOGIN)
+    log.info("  DRY_RUN : %s   CONFIRM_MODE: %s", DTN07122_DRY_RUN, DTN07122_CONFIRM_MODE)
+    log.info("=" * 56)
     launch_terminal()
     signed_in = False
     while True:
@@ -455,7 +478,7 @@ def main():
             log.info("Stopped")
             break
         except Exception as e:
-            log.error("Loop error: %s", e)
+            log.error("Loop error: %s", e, exc_info=True)
             signed_in = False
         time.sleep(POLL_INTERVAL)
 
