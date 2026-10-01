@@ -71,7 +71,7 @@ WAIT_TIMEOUT              = float(os.getenv("WAIT_TIMEOUT", "8"))
 DTN07122_STOP_BEFORE_CONFIRM = os.getenv("DTN07122_STOP_BEFORE_CONFIRM", "false").lower() == "true"
 DTN07122_REVIEW_PAUSE        = float(os.getenv("DTN07122_REVIEW_PAUSE", "0"))
 DTN07122_DRY_RUN             = os.getenv("DTN07122_DRY_RUN", "false").lower() == "true"
-DTN07122_CONFIRM_MODE        = os.getenv("DTN07122_CONFIRM_MODE", "false").lower() == "true"
+DTN07122_CONFIRM_MODE        = True  # ponytail: always on — operator must confirm before every submit
 CONFIRM_TIMEOUT_SEC          = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
 
 
