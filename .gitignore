@@ -1,0 +1,11 @@
+.env
+**/.env
+__pycache__/
+**/__pycache__/
+*.pyc
+build/
+dist/
+py32/
+*.zip
+nssm.exe
+logs/
