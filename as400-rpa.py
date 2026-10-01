@@ -12,7 +12,7 @@ AS400 RPA — EHLLAPI version (พอร์ตจาก as400-rpa.py)
 ฟิลด์ที่ยังต้องจูนกับจอจริง (ตั้งใน .env, เป็น row/col เสถียรกว่า pixel/tab เดิม):
    DTN07122_KGS_TO_VNAME_GAP, MHT53202_OPT_COL
 """
-import os, sys, time, logging, logging.handlers, pyodbc, ctypes
+import os, sys, time, logging, logging.handlers, subprocess, pyodbc, ctypes
 from dotenv import load_dotenv
 
 import ehllapi
@@ -47,6 +47,10 @@ AS400_MENU_OPTION   = os.getenv("AS400_MENU_OPTION", "")
 PBASMT_CHECK_PASS   = os.getenv("PBASMT_CHECK_PASS", "")
 PBASMT_SECTION_CODE = os.getenv("PBASMT_SECTION_CODE", "71DM")  # ponytail: fixed value, override via .env if needed
 SKIP_LOGIN = os.getenv("SKIP_LOGIN", "false").lower() == "true"
+
+PCOMM_EXE        = os.getenv("PCOMM_EXE", r"C:\Program Files (x86)\IBM\Client Access\Emulator\pcsws.exe")
+PCOMM_WORKSPACE  = os.getenv("PCOMM_WORKSPACE", "")   # path to .pws workspace file
+PCOMM_START_WAIT = int(os.getenv("PCOMM_START_WAIT", "15"))  # seconds to wait for session after launch
 
 # knobs (row/col based — เสถียรกว่า pixel/tab เดิม) ปรับใน .env ได้ไม่ต้อง build
 DTN07122_KGS_TO_VNAME_GAP = int(os.getenv("DTN07122_KGS_TO_VNAME_GAP", "1"))  # cols ถัดจาก KGS ถึงช่อง VENDOR_NAME
@@ -125,6 +129,25 @@ def connect_session():
     except ehllapi.EHLLAPIError as e:
         log.warning("%s", e)
         return False
+
+def launch_terminal():
+    """เปิด PC5250 ถ้ายังไม่รัน — no-op ถ้า session พร้อมแล้ว"""
+    if connect_session():
+        return   # already running
+    if not os.path.exists(PCOMM_EXE):
+        log.error("ไม่พบ PCOMM_EXE=%s — เปิด PC5250 เองก่อนรัน", PCOMM_EXE)
+        return
+    cmd = [PCOMM_EXE]
+    if PCOMM_WORKSPACE:
+        cmd.append(PCOMM_WORKSPACE)
+    log.info("เปิด PC5250: %s", " ".join(cmd))
+    subprocess.Popen(cmd)
+    for _ in range(PCOMM_START_WAIT * 2):
+        time.sleep(0.5)
+        if connect_session():
+            log.info("PC5250 พร้อม — session '%s'", SS.psid)
+            return
+    log.warning("รอ PC5250 %ds แต่ EHLLAPI session ยังไม่พร้อม", PCOMM_START_WAIT)
 
 def _verify_on_screen(record, keys=("VENDOR_CODE", "MATLOT", "ITEM_NO"), screen="", s=None):
     """เช็ค exact ว่าค่าใน record ปรากฏบนจอ — raise ถ้าไม่ครบ (อ่าน buffer ตรง ไม่มี OCR เพี้ยน)"""
@@ -417,6 +440,7 @@ def main():
         try: st.reconfigure(encoding="utf-8", errors="replace")
         except Exception: pass
     log.info("EHLLAPI RPA — polling every %ds (Ctrl-C to stop)", POLL_INTERVAL)
+    launch_terminal()
     signed_in = False
     while True:
         try:
