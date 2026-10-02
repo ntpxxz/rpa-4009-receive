@@ -12,8 +12,13 @@ AS400 RPA — EHLLAPI version (พอร์ตจาก as400-rpa.py)
 ฟิลด์ที่ยังต้องจูนกับจอจริง (ตั้งใน .env, เป็น row/col เสถียรกว่า pixel/tab เดิม):
    DTN07122_KGS_TO_VNAME_GAP, MHT53202_OPT_COL
 """
-import os, sys, time, logging, logging.handlers, subprocess, pyodbc, ctypes
+import os, sys, time, logging, logging.handlers, subprocess, threading, pyodbc, ctypes
 from dotenv import load_dotenv
+
+try:
+    import pyi_splash as _pyi_splash   # available only in frozen exe with PyInstaller Splash
+except ImportError:
+    _pyi_splash = None
 
 import ehllapi
 
@@ -27,9 +32,12 @@ _fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 _fh = logging.handlers.RotatingFileHandler(
     os.path.join(_log_dir, "as400-rpa.log"), maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
 _fh.setFormatter(_fmt)
-_sh = logging.StreamHandler()
-_sh.setFormatter(_fmt)
-logging.basicConfig(level=logging.INFO, handlers=[_fh, _sh])
+_handlers = [_fh]
+if not getattr(sys, "frozen", False):  # console only in dev mode
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(_fmt)
+    _handlers.append(_sh)
+logging.basicConfig(level=logging.INFO, handlers=_handlers)
 log = logging.getLogger("as400-rpa-ehllapi")
 
 # Activity log — one line per record event; readable by supervisor without technical noise
@@ -140,6 +148,33 @@ def get_queue_status(record_id):
 # ─── EHLLAPI session (global) ─────────────────────────────────────────────────
 SS = None        # ehllapi.Session
 _last_sid = None # track session state to suppress repeated log lines
+
+_SESSION_ALERT_TITLE = "AS400 Session Lost"
+_session_lost = False  # True while session is down (controls alert lifecycle)
+
+def _session_alert_worker(msg):
+    ctypes.windll.user32.MessageBoxW(0, msg, _SESSION_ALERT_TITLE, 0x40010)  # MB_OK|MB_ICONERROR|MB_TOPMOST
+
+def _notify_session_lost(reason=""):
+    global _session_lost
+    if _session_lost:
+        return
+    _session_lost = True
+    msg = f"AS400 session disconnected หรือยังไม่ได้เปิด\n{reason}\n\nโปรแกรมกำลังรอ reconnect อัตโนมัติ..."
+    threading.Thread(target=_session_alert_worker, args=(msg,), daemon=True).start()
+    _update_tray_tip("AS400 RPA — Session disconnected")
+
+def _notify_session_ok():
+    global _session_lost
+    if not _session_lost:
+        return
+    _session_lost = False
+    hwnd = ctypes.windll.user32.FindWindowW(None, _SESSION_ALERT_TITLE)
+    if hwnd:
+        ctypes.windll.user32.PostMessageW(hwnd, 0x10, 0, 0)  # WM_CLOSE
+    _update_tray_tip("AS400 RPA — Connected")
+    ctypes.windll.user32.MessageBoxTimeoutW(
+        0, "AS400 session reconnected — กำลัง continue...", "AS400 Reconnected", 0x40040, 0, 3000)
 
 def connect_session():
     """คืน True ถ้าต่อ session 5250 ได้ (เปิดจอ + sign-in ไว้แล้ว)"""
@@ -520,15 +555,227 @@ def poll():
         if _had_pending:
             log.info("Queue empty")
             _had_pending = False
+            _update_tray_tip("AS400 RPA — Idle")
         return
     if not _had_pending:
         _had_pending = True
     log.info("Queue: %d pending", len(pending))
     for i, record in enumerate(pending, 1):
         log.info("─── %d/%d ─────────────────────────────", i, len(pending))
+        label = record.get("shortname") or record.get("VENDOR_CODE", "?")
+        _update_tray_tip(f"AS400 RPA — {i}/{len(pending)} [{label}] {record.get('ITEM_NO','')}")
         process_record(record)
 
+class _Splash(threading.Thread):
+    """Startup splash — pyi_splash (cover image) when frozen, Win32 window in dev."""
+    _BG  = 0x11_11_11
+    _FG  = 0xF0_F0_F0
+    _SUB = 0x55_55_55
+    _ACC = 0xFF_A6_58
+
+    def __init__(self, icon_path=None):
+        super().__init__(daemon=True, name="splash")
+        self._status = "กำลังเริ่มต้น"
+        self._dots   = 0
+        self._closed = False
+        self._hwnd   = None
+        self._icon   = icon_path
+        self.start()
+        if not _pyi_splash:   # wait for win32 window to appear
+            for _ in range(40):
+                if self._hwnd: break
+                time.sleep(0.05)
+
+    def run(self):
+        if _pyi_splash:
+            while not self._closed:
+                self._dots = (self._dots + 1) % 4
+                try:
+                    _pyi_splash.update_text(f"{self._status}{'.' * self._dots}")
+                except Exception:
+                    break
+                time.sleep(0.4)
+            return
+        self._run_win32()
+
+    def _run_win32(self):
+        import ctypes.wintypes as wt
+        u32 = ctypes.windll.user32
+        g32 = ctypes.windll.gdi32
+        hInst = ctypes.windll.kernel32.GetModuleHandleW(None)
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        class PAINTSTRUCT(ctypes.Structure):
+            _fields_ = [("hdc", wt.HDC), ("fErase", wt.BOOL), ("rcPaint", wt.RECT),
+                        ("fRestore", wt.BOOL), ("fIncUpdate", wt.BOOL),
+                        ("rgbReserved", ctypes.c_byte * 32)]
+
+        class WNDCLASSEXW(ctypes.Structure):
+            _fields_ = [("cbSize", wt.UINT), ("style", wt.UINT),
+                        ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int), ("hInstance", wt.HINSTANCE),
+                        ("hIcon", wt.HICON), ("hCursor", wt.HANDLE),
+                        ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
+                        ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON)]
+
+        def wndproc(hwnd, msg, wp, lp):
+            if msg == 0x000F:  # WM_PAINT
+                ps = PAINTSTRUCT()
+                hdc = u32.BeginPaint(hwnd, ctypes.byref(ps))
+                rc  = wt.RECT()
+                u32.GetClientRect(hwnd, ctypes.byref(rc))
+                hbr = g32.CreateSolidBrush(self._BG)
+                u32.FillRect(hdc, ctypes.byref(rc), hbr)
+                g32.DeleteObject(hbr)
+                hpen = g32.CreatePen(0, 1, 0x33_33_33)
+                g32.SelectObject(hdc, hpen)
+                g32.SelectObject(hdc, g32.GetStockObject(5))  # NULL_BRUSH
+                g32.Rectangle(hdc, 0, 0, rc.right, rc.bottom)
+                g32.DeleteObject(hpen)
+                g32.SetBkMode(hdc, 1)  # TRANSPARENT
+                hf_big = g32.CreateFontW(26, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 0, 0, "Segoe UI")
+                hf_sm  = g32.CreateFontW(14, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Segoe UI")
+                g32.SelectObject(hdc, hf_big)
+                g32.SetTextColor(hdc, self._FG)
+                u32.TextOutW(hdc, 24, 22, "AS400 RPA", 9)
+                g32.SelectObject(hdc, hf_sm)
+                g32.DeleteObject(hf_big)
+                g32.SetTextColor(hdc, self._SUB)
+                u32.TextOutW(hdc, 26, 58, "EHLLAPI Automation", 18)
+                status = f"{self._status}{'.' * self._dots}"
+                g32.SetTextColor(hdc, self._ACC)
+                u32.TextOutW(hdc, 26, 90, status, len(status))
+                g32.SelectObject(hdc, g32.GetStockObject(17))  # SYSTEM_FONT — deselect hf_sm
+                g32.DeleteObject(hf_sm)
+                u32.EndPaint(hwnd, ctypes.byref(ps))
+                return 0
+            elif msg == 0x0113:  # WM_TIMER
+                self._dots = (self._dots + 1) % 4
+                u32.InvalidateRect(hwnd, None, True)
+                return 0
+            elif msg in (0x0002, 0x0010):  # WM_DESTROY / WM_CLOSE
+                u32.PostQuitMessage(0)
+                return 0
+            return u32.DefWindowProcW(hwnd, msg, wp, lp)
+
+        _proc = WNDPROC(wndproc)
+        cls = "AS400RPASplash"
+        wcx = WNDCLASSEXW()
+        wcx.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wcx.lpfnWndProc = _proc
+        wcx.hInstance = hInst
+        wcx.hbrBackground = g32.CreateSolidBrush(self._BG)
+        wcx.lpszClassName = cls
+        u32.RegisterClassExW(ctypes.byref(wcx))
+
+        W, H = 360, 130
+        hwnd = u32.CreateWindowExW(
+            0x00000008,   # WS_EX_TOPMOST
+            cls, "AS400 RPA",
+            0x80000000,   # WS_POPUP
+            (u32.GetSystemMetrics(0) - W) // 2,
+            (u32.GetSystemMetrics(1) - H) // 2,
+            W, H, None, None, hInst, None)
+        self._hwnd = hwnd
+
+        if self._icon and os.path.exists(self._icon):
+            hi = u32.LoadImageW(None, self._icon, 1, 0, 0, 0x10)  # LR_LOADFROMFILE
+            if hi:
+                u32.SendMessageW(hwnd, 0x80, 1, hi)
+                u32.SendMessageW(hwnd, 0x80, 0, hi)
+
+        u32.ShowWindow(hwnd, 5)   # SW_SHOW
+        u32.UpdateWindow(hwnd)
+        u32.SetTimer(hwnd, 1, 400, None)
+
+        m = wt.MSG()
+        while u32.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
+            u32.TranslateMessage(ctypes.byref(m))
+            u32.DispatchMessageW(ctypes.byref(m))
+
+    def update(self, msg):
+        self._status = msg
+        if _pyi_splash and not self._closed:
+            try: _pyi_splash.update_text(f"{msg}{'.' * self._dots}")
+            except Exception: pass
+        elif self._hwnd:
+            ctypes.windll.user32.InvalidateRect(self._hwnd, None, True)
+
+    def close(self):
+        self._closed = True
+        if _pyi_splash:
+            try: _pyi_splash.close()
+            except Exception: pass
+        else:
+            hwnd, self._hwnd = self._hwnd, None
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+
+
+class _NOTIFYICONDATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize",           ctypes.c_uint32),
+        ("hWnd",             ctypes.c_void_p),
+        ("uID",              ctypes.c_uint32),
+        ("uFlags",           ctypes.c_uint32),
+        ("uCallbackMessage", ctypes.c_uint32),
+        ("hIcon",            ctypes.c_void_p),
+        ("szTip",            ctypes.c_wchar * 128),
+    ]
+
+_tray_hwnd = None  # saved for cleanup
+
+def _add_tray_icon(hwnd, hicon):
+    global _tray_hwnd
+    _tray_hwnd = hwnd
+    nid = _NOTIFYICONDATA()
+    nid.cbSize = ctypes.sizeof(_NOTIFYICONDATA)
+    nid.hWnd   = hwnd
+    nid.uID    = 1
+    nid.uFlags = 0x2 | 0x4  # NIF_ICON | NIF_TIP
+    nid.hIcon  = hicon or 0
+    nid.szTip  = "AS400 RPA"
+    ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
+
+def _remove_tray_icon():
+    if not _tray_hwnd:
+        return
+    nid = _NOTIFYICONDATA()
+    nid.cbSize = ctypes.sizeof(_NOTIFYICONDATA)
+    nid.hWnd   = _tray_hwnd
+    nid.uID    = 1
+    ctypes.windll.shell32.Shell_NotifyIconW(2, ctypes.byref(nid))  # NIM_DELETE
+
+def _update_tray_tip(text):
+    if not _tray_hwnd:
+        return
+    nid = _NOTIFYICONDATA()
+    nid.cbSize = ctypes.sizeof(_NOTIFYICONDATA)
+    nid.hWnd   = _tray_hwnd
+    nid.uID    = 1
+    nid.uFlags = 0x4  # NIF_TIP
+    nid.szTip  = text[:127]
+    ctypes.windll.shell32.Shell_NotifyIconW(1, ctypes.byref(nid))  # NIM_MODIFY
+
+def _set_console_icon():
+    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if not hwnd:
+        return
+    if getattr(sys, "frozen", False):
+        hicon = ctypes.windll.shell32.ExtractIconW(0, sys.executable, 0)
+    else:
+        ico = os.path.join(_base, "black-box.ico")
+        hicon = ctypes.windll.user32.LoadImageW(0, ico, 1, 0, 0, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+    if hicon and hicon != 1:
+        ctypes.windll.user32.SendMessageW(hwnd, 0x80, 1, hicon)  # WM_SETICON ICON_BIG
+        ctypes.windll.user32.SendMessageW(hwnd, 0x80, 0, hicon)  # WM_SETICON ICON_SMALL
+    # hide console button from taskbar; add to notification area instead
+    style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+    ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | 0x80)  # +WS_EX_TOOLWINDOW
+    _add_tray_icon(hwnd, hicon if (hicon and hicon != 1) else 0)
+
 def main():
+    _set_console_icon()
     for st in (sys.stdout, sys.stderr):
         try: st.reconfigure(encoding="utf-8", errors="replace")
         except Exception: pass
@@ -540,13 +787,14 @@ def main():
     log.info("=" * 56)
     alog.info("START  session=%s db=%s/%s skip_login=%s dry_run=%s confirm_mode=%s",
               SESSION_ID, DB_SERVER, DB_NAME, SKIP_LOGIN, DTN07122_DRY_RUN, DTN07122_CONFIRM_MODE)
-    # 1. Connect DB ก่อน — retry จนสำเร็จ
+
+    splash = _Splash(os.path.join(_base, "black-box.ico"))
+
+    # 1. Connect DB — retry จนสำเร็จ
+    splash.update("เชื่อมต่อฐานข้อมูล")
     while True:
         try:
             _get_db()
-            ctypes.windll.user32.MessageBoxTimeoutW(
-                0, f"เชื่อมต่อฐานข้อมูลสำเร็จ\n{DB_SERVER} / {DB_NAME}  user={DB_USER}",
-                "DB Connected", 0x40040, 0, 5000)  # MB_ICONINFORMATION|MB_TOPMOST, 5s
             break
         except Exception as e:
             ctypes.windll.user32.MessageBoxTimeoutW(
@@ -556,16 +804,21 @@ def main():
             time.sleep(POLL_INTERVAL)
 
     # 2. Launch terminal + login
+    splash.update("เปิด PC5250")
     launch_terminal()
     signed_in = False
     while True:
         try:
             if not connect_session():
+                _notify_session_lost()
                 signed_in = False
             else:
+                _notify_session_ok()
                 if not signed_in:
+                    splash.update("เข้าสู่ระบบ AS400")
                     ensure_signed_in()
                     signed_in = True
+                    splash.close()
                 scr = SS.read()
                 if "MHT53201" not in scr and "VENDOR CODE" not in scr:
                     log.warning("ไม่อยู่บน MHT53201 — AS400 session timeout? — re-login")
@@ -576,6 +829,7 @@ def main():
         except KeyboardInterrupt:
             log.info("Stopped")
             alog.info("STOP   (KeyboardInterrupt)")
+            _remove_tray_icon()
             break
         except Exception as e:
             log.error("Loop error: %s", e, exc_info=True)
