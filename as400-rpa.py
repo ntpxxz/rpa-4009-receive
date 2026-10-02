@@ -618,42 +618,67 @@ class _Splash(threading.Thread):
                         ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
                         ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON)]
 
+        # locate cover_splash.bmp (bundled to sys._MEIPASS in frozen mode)
+        IMG_W, IMG_H = 1531, 862
+        bmp_root = getattr(sys, "_MEIPASS", _base)
+        bmp = os.path.join(bmp_root, "cover_splash.bmp")
+
+        sw, sh = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+        scale = min(sw / IMG_W, sh / IMG_H, 1.0)
+        W, H  = int(IMG_W * scale), int(IMG_H * scale)
+        # text position scaled from original image coords (Loading area at ~630,625)
+        TX, TY    = int(630 * scale), int(625 * scale)
+        FONT_H    = max(int(18 * scale), 12)
+
+        _bg = [None]   # pre-rendered background DC (set on WM_CREATE)
+
         def wndproc(hwnd, msg, wp, lp):
+            if msg == 0x0001:  # WM_CREATE — pre-render cover image into off-screen DC
+                if os.path.exists(bmp):
+                    hbmp = u32.LoadImageW(None, bmp, 0, 0, 0, 0x10)  # IMAGE_BITMAP, LR_LOADFROMFILE
+                    if hbmp:
+                        dc     = u32.GetDC(hwnd)
+                        src_dc = g32.CreateCompatibleDC(dc)
+                        dst_dc = g32.CreateCompatibleDC(dc)
+                        dst_bm = g32.CreateCompatibleBitmap(dc, W, H)
+                        g32.SelectObject(src_dc, hbmp)
+                        g32.SelectObject(dst_dc, dst_bm)
+                        g32.SetStretchBltMode(dst_dc, 4)  # HALFTONE
+                        g32.StretchBlt(dst_dc, 0, 0, W, H, src_dc, 0, 0, IMG_W, IMG_H, 0x00CC0020)
+                        g32.DeleteDC(src_dc)
+                        g32.DeleteObject(hbmp)
+                        u32.ReleaseDC(hwnd, dc)
+                        _bg[0] = dst_dc   # keep dst_dc alive for WM_PAINT
+                return 0
+
             if msg == 0x000F:  # WM_PAINT
-                ps = PAINTSTRUCT()
+                ps  = PAINTSTRUCT()
                 hdc = u32.BeginPaint(hwnd, ctypes.byref(ps))
-                rc  = wt.RECT()
-                u32.GetClientRect(hwnd, ctypes.byref(rc))
-                hbr = g32.CreateSolidBrush(self._BG)
-                u32.FillRect(hdc, ctypes.byref(rc), hbr)
-                g32.DeleteObject(hbr)
-                hpen = g32.CreatePen(0, 1, 0x33_33_33)
-                g32.SelectObject(hdc, hpen)
-                g32.SelectObject(hdc, g32.GetStockObject(5))  # NULL_BRUSH
-                g32.Rectangle(hdc, 0, 0, rc.right, rc.bottom)
-                g32.DeleteObject(hpen)
-                g32.SetBkMode(hdc, 1)  # TRANSPARENT
-                hf_big = g32.CreateFontW(26, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 0, 0, "Segoe UI")
-                hf_sm  = g32.CreateFontW(14, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Segoe UI")
-                g32.SelectObject(hdc, hf_big)
-                g32.SetTextColor(hdc, self._FG)
-                u32.TextOutW(hdc, 24, 22, "AS400 RPA", 9)
-                g32.SelectObject(hdc, hf_sm)
-                g32.DeleteObject(hf_big)
-                g32.SetTextColor(hdc, self._SUB)
-                u32.TextOutW(hdc, 26, 58, "EHLLAPI Automation", 18)
+                if _bg[0]:
+                    g32.BitBlt(hdc, 0, 0, W, H, _bg[0], 0, 0, 0x00CC0020)  # SRCCOPY from pre-rendered
+                else:
+                    rc  = wt.RECT()
+                    u32.GetClientRect(hwnd, ctypes.byref(rc))
+                    hbr = g32.CreateSolidBrush(self._BG)
+                    u32.FillRect(hdc, ctypes.byref(rc), hbr)
+                    g32.DeleteObject(hbr)
+                hf = g32.CreateFontW(FONT_H, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+                g32.SelectObject(hdc, hf)
+                g32.SetBkMode(hdc, 1)        # TRANSPARENT
+                g32.SetTextColor(hdc, 0x14_FF_39)  # #39FF14 neon green (BGR)
                 status = f"{self._status}{'.' * self._dots}"
-                g32.SetTextColor(hdc, self._ACC)
-                u32.TextOutW(hdc, 26, 90, status, len(status))
-                g32.SelectObject(hdc, g32.GetStockObject(17))  # SYSTEM_FONT — deselect hf_sm
-                g32.DeleteObject(hf_sm)
+                u32.TextOutW(hdc, TX, TY, status, len(status))
+                g32.SelectObject(hdc, g32.GetStockObject(17))
+                g32.DeleteObject(hf)
                 u32.EndPaint(hwnd, ctypes.byref(ps))
                 return 0
+
             elif msg == 0x0113:  # WM_TIMER
                 self._dots = (self._dots + 1) % 4
-                u32.InvalidateRect(hwnd, None, True)
+                u32.InvalidateRect(hwnd, None, False)  # no erase — BitBlt covers it
                 return 0
             elif msg in (0x0002, 0x0010):  # WM_DESTROY / WM_CLOSE
+                if _bg[0]: g32.DeleteDC(_bg[0])
                 u32.PostQuitMessage(0)
                 return 0
             return u32.DefWindowProcW(hwnd, msg, wp, lp)
@@ -668,23 +693,21 @@ class _Splash(threading.Thread):
         wcx.lpszClassName = cls
         u32.RegisterClassExW(ctypes.byref(wcx))
 
-        W, H = 360, 130
         hwnd = u32.CreateWindowExW(
             0x00000008,   # WS_EX_TOPMOST
             cls, "AS400 RPA",
             0x80000000,   # WS_POPUP
-            (u32.GetSystemMetrics(0) - W) // 2,
-            (u32.GetSystemMetrics(1) - H) // 2,
-            W, H, None, None, hInst, None)
+            (sw - W) // 2, (sh - H) // 2, W, H,
+            None, None, hInst, None)
         self._hwnd = hwnd
 
         if self._icon and os.path.exists(self._icon):
-            hi = u32.LoadImageW(None, self._icon, 1, 0, 0, 0x10)  # LR_LOADFROMFILE
+            hi = u32.LoadImageW(None, self._icon, 1, 0, 0, 0x10)
             if hi:
                 u32.SendMessageW(hwnd, 0x80, 1, hi)
                 u32.SendMessageW(hwnd, 0x80, 0, hi)
 
-        u32.ShowWindow(hwnd, 5)   # SW_SHOW
+        u32.ShowWindow(hwnd, 5)
         u32.UpdateWindow(hwnd)
         u32.SetTimer(hwnd, 1, 400, None)
 
@@ -695,6 +718,7 @@ class _Splash(threading.Thread):
 
     def update(self, msg):
         self._status = msg
+        _update_tray_tip(f"AS400 RPA — {msg}")
         if _pyi_splash and not self._closed:
             try: _pyi_splash.update_text(f"{msg}{'.' * self._dots}")
             except Exception: pass
@@ -724,17 +748,19 @@ class _NOTIFYICONDATA(ctypes.Structure):
     ]
 
 _tray_hwnd = None  # saved for cleanup
+_WM_TRAY   = 0x8001  # WM_APP+1 — tray icon callback
 
 def _add_tray_icon(hwnd, hicon):
     global _tray_hwnd
     _tray_hwnd = hwnd
     nid = _NOTIFYICONDATA()
-    nid.cbSize = ctypes.sizeof(_NOTIFYICONDATA)
-    nid.hWnd   = hwnd
-    nid.uID    = 1
-    nid.uFlags = 0x2 | 0x4  # NIF_ICON | NIF_TIP
-    nid.hIcon  = hicon or 0
-    nid.szTip  = "AS400 RPA"
+    nid.cbSize         = ctypes.sizeof(_NOTIFYICONDATA)
+    nid.hWnd           = hwnd
+    nid.uID            = 1
+    nid.uFlags         = 0x1 | 0x2 | 0x4  # NIF_MESSAGE | NIF_ICON | NIF_TIP
+    nid.uCallbackMessage = _WM_TRAY
+    nid.hIcon          = hicon or 0
+    nid.szTip          = "AS400 RPA"
     ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
 
 def _remove_tray_icon():
@@ -757,9 +783,124 @@ def _update_tray_tip(text):
     nid.szTip  = text[:127]
     ctypes.windll.shell32.Shell_NotifyIconW(1, ctypes.byref(nid))  # NIM_MODIFY
 
+def _toggle_log_console():
+    """Left-click: allocate a console first time; subsequent clicks toggle visibility."""
+    k32 = ctypes.windll.kernel32
+    u32 = ctypes.windll.user32
+    hwnd = k32.GetConsoleWindow()
+    if not hwnd:
+        k32.AllocConsole()
+        hwnd = k32.GetConsoleWindow()
+        if hwnd:
+            u32.SetWindowTextW(hwnd, "AS400 RPA — Log")
+        try:
+            conout = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+            sys.stdout = conout
+            sys.stderr = conout
+            sh = logging.StreamHandler(conout)
+            sh.setFormatter(_fmt)
+            logging.getLogger().addHandler(sh)
+            log.info("Console attached")
+        except Exception:
+            pass
+    else:
+        visible = u32.IsWindowVisible(hwnd)
+        u32.ShowWindow(hwnd, 0 if visible else 5)  # SW_HIDE / SW_SHOW
+        if not visible:
+            u32.SetForegroundWindow(hwnd)
+
+def _show_tray_menu(host_hwnd):
+    """Right-click: popup menu — Show/Hide Console, Open Log File, Exit."""
+    import ctypes.wintypes as wt
+    u32 = ctypes.windll.user32
+    IDM_CONSOLE, IDM_LOG, IDM_EXIT = 1, 2, 3
+    hwnd_con = ctypes.windll.kernel32.GetConsoleWindow()
+    con_label = ("Hide Console"
+                 if hwnd_con and u32.IsWindowVisible(hwnd_con)
+                 else "Show Console")
+    hmenu = u32.CreatePopupMenu()
+    u32.AppendMenuW(hmenu, 0,     IDM_CONSOLE, con_label)
+    u32.AppendMenuW(hmenu, 0,     IDM_LOG,     "Open Log File")
+    u32.AppendMenuW(hmenu, 0x800, 0,           None)   # MF_SEPARATOR
+    u32.AppendMenuW(hmenu, 0,     IDM_EXIT,    "Exit")
+    pt = wt.POINT()
+    u32.GetCursorPos(ctypes.byref(pt))
+    u32.SetForegroundWindow(host_hwnd)  # required so menu dismisses on click-away
+    cmd = u32.TrackPopupMenu(hmenu, 0x0120, pt.x, pt.y, 0, host_hwnd, None)
+    # TPM_RETURNCMD=0x0100 | TPM_BOTTOMALIGN=0x0020
+    u32.PostMessageW(host_hwnd, 0, 0, 0)  # WM_NULL — flush
+    u32.DestroyMenu(hmenu)
+    if cmd == IDM_CONSOLE:
+        _toggle_log_console()
+    elif cmd == IDM_LOG:
+        try: os.startfile(os.path.join(_log_dir, "as400-rpa.log"))
+        except Exception: pass
+    elif cmd == IDM_EXIT:
+        _remove_tray_icon()
+        os._exit(0)
+
+def _start_tray_host():
+    """No-console frozen exe: spin a daemon thread with a hidden Win32 window + message loop to own the tray icon."""
+    import ctypes.wintypes as wt
+    u32   = ctypes.windll.user32
+    hInst = ctypes.windll.kernel32.GetModuleHandleW(None)
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+    hicon = ctypes.windll.shell32.ExtractIconW(0, sys.executable, 0)
+    if not hicon or hicon == 1:
+        hicon = 0
+
+    ready = threading.Event()
+
+    def _thread():
+        def wndproc(hwnd, msg, wp, lp):
+            if msg == _WM_TRAY:
+                notif = lp & 0xFFFF
+                if notif == 0x202:    # WM_LBUTTONUP
+                    _toggle_log_console()
+                elif notif == 0x205:  # WM_RBUTTONUP
+                    _show_tray_menu(hwnd)
+                return 0
+            if msg in (0x0002, 0x0010):  # WM_DESTROY / WM_CLOSE
+                u32.PostQuitMessage(0)
+                return 0
+            return u32.DefWindowProcW(hwnd, msg, wp, lp)
+        proc = WNDPROC(wndproc)  # keep alive for message loop lifetime
+
+        class WNDCLASSEXW(ctypes.Structure):
+            _fields_ = [("cbSize", wt.UINT), ("style", wt.UINT),
+                        ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int), ("hInstance", wt.HINSTANCE),
+                        ("hIcon", wt.HICON), ("hCursor", wt.HANDLE),
+                        ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
+                        ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON)]
+        wcx = WNDCLASSEXW()
+        wcx.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wcx.lpfnWndProc = proc
+        wcx.hInstance = hInst
+        wcx.lpszClassName = "AS400RPATrayHost"
+        u32.RegisterClassExW(ctypes.byref(wcx))
+
+        hwnd = u32.CreateWindowExW(
+            0x80,             # WS_EX_TOOLWINDOW — hidden from taskbar
+            "AS400RPATrayHost", "AS400 RPA",
+            0x00800000,       # WS_OVERLAPPED, never shown
+            0, 0, 1, 1, None, None, hInst, None)
+        _add_tray_icon(hwnd, hicon)
+        ready.set()
+
+        m = wt.MSG()
+        while u32.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
+            u32.TranslateMessage(ctypes.byref(m))
+            u32.DispatchMessageW(ctypes.byref(m))
+
+    threading.Thread(target=_thread, daemon=True, name="tray-host").start()
+    ready.wait(timeout=2)
+
 def _set_console_icon():
     hwnd = ctypes.windll.kernel32.GetConsoleWindow()
     if not hwnd:
+        _start_tray_host()  # frozen no-console: host tray on a dedicated hidden window
         return
     if getattr(sys, "frozen", False):
         hicon = ctypes.windll.shell32.ExtractIconW(0, sys.executable, 0)
