@@ -208,8 +208,13 @@ class Session:
         return landed
 
     def enter(self):
-        self._stops_cache = None   # screen transitions after Enter
+        self._stops_cache = None
         self.send("@E")
+
+    def pf(self, n):
+        """Send PF key — clears field-stop cache because PF keys transition screens"""
+        self._stops_cache = None
+        self.send(f"@{n}")
 
     def tab(self):
         self.send("@T")

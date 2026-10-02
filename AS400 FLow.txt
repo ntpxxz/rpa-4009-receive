@@ -1,0 +1,6 @@
+Sign on: PBASMT-> tab -> TPBASMT -> [enter] -> [enter]
+XDP05301:  USER ID get from .env -> [tab]-> PASSWORD from env -> [enter]
+TPBAS00W1 (menu page): 16 -> [enter] -> mp -> [enter] -> 13 -> [enter]
+XDP05001 (PASSWORD CHECK PROGRAM): PASSWORD GET FROM .env (same XDP05301) 
+	-> [tab] section code -> 71DM (fix) -> [enter]
+MHT53205: [tab] to BARCODE WITH OUT MAT LOT -> [enter] ---> MHT53201 (old flow)

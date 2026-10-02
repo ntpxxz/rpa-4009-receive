@@ -231,7 +231,7 @@ def screen_pbasmt_login():
         time.sleep(0.5)
     SS.send(f"{PBASMT_USER}@T{PBASMT_PASS}@E")
     log.info("→ PBASMT: %s", PBASMT_USER)
-    time.sleep(0.005)
+    SS.wait()
     SS.enter()
     if not SS.wait_for("TPBAS00W1", timeout=WAIT_TIMEOUT):
         log.warning("→ PBASMT: หน้า TPBAS00W1 ไม่ปรากฏใน %.0fs\n%s", WAIT_TIMEOUT, SS.read())
@@ -249,11 +249,13 @@ def navigate_menu():
         deadline = time.time() + WAIT_TIMEOUT
         while time.time() < deadline:
             SS.wait()
-            if SS.contains("Display Program Messages"):
+            scr = SS.read()
+            if "DISPLAY PROGRAM MESSAGES" in scr.upper():
                 log.info("→ Menu: dismiss system message")
                 SS.enter()
-                prev = ""   # force loop to see next screen as "changed"
-            if SS.read() != prev:
+                prev = ""
+                continue
+            if scr != prev:
                 break
             time.sleep(0.2)
 
@@ -309,7 +311,7 @@ def screen_mht53202_select_do(tax_inv_no):
         if pos:
             break
         log.info("→ MHT53202: ไม่เจอ %s หน้า %d — PF8 ดูหน้าถัดไป", tax_inv_no, page + 1)
-        SS.send("@8"); SS.wait()   # PF8 = Page Forward on MHT53202
+        SS.pf(8); SS.wait()   # PF8 = Page Forward on MHT53202
     if not pos:
         raise ValueError(f"MHT53202: หา D/O ที่ TAX INV.NO={tax_inv_no} ไม่เจอใน {MHT53202_MAX_PAGES} หน้า")
     row, _ = pos
@@ -380,18 +382,31 @@ def screen_dtn07122_confirm(record):
 
         deadline = time.time() + CONFIRM_TIMEOUT_SEC
         while time.time() < deadline:
-            status = get_queue_status(record["id"])
+            try:
+                status = get_queue_status(record["id"])
+            except Exception as db_e:
+                log.warning("→ DTN07122: get_queue_status failed: %s — retry in 2s", db_e)
+                time.sleep(2)
+                continue
             if status == "CONFIRMED":
                 SS.enter(); SS.wait(); SS.enter()
                 log.info("→ DTN07122: confirmed by operator (Enter x2)")
                 if not SS.wait_for("MHT53201", WAIT_TIMEOUT):
                     raise ValueError("DTN07122: confirm แล้วไม่กลับหน้า MHT53201")
-                mark_done(record["id"], "SENT")
+                for _attempt in range(3):
+                    try:
+                        mark_done(record["id"], "SENT")
+                        break
+                    except Exception as db_e:
+                        log.warning("mark SENT failed (attempt %d): %s", _attempt + 1, db_e)
+                        time.sleep(2)
+                else:
+                    log.critical("id=%s ส่ง AS400 แล้ว แต่ mark SENT ไม่ได้ 3 ครั้ง — ค้างอยู่ AWAITING_CONFIRM", record["id"])
                 return
             if status == "FAILED":
                 log.info("→ DTN07122: rejected by operator")
                 raise DryRunStop("DTN07122: ผู้ใช้ยกเลิกผ่าน web — ไม่ submit")
-            time.sleep(1)
+            time.sleep(2)
         mark_done(record["id"], "FAILED", f"Confirm timeout after {CONFIRM_TIMEOUT_SEC}s")
         raise DryRunStop(f"DTN07122: timeout {CONFIRM_TIMEOUT_SEC}s — ไม่ได้รับการยืนยัน")
 
@@ -434,8 +449,8 @@ def input_to_as400(record):
 def _f1_to_mht53201():
     """กด F1 ตรงๆ จาก DTN07122 (DRY_RUN / ยกเลิก) — ไม่ reset ก่อน เพราะ reset รบกวน"""
     time.sleep(0.3)   # ให้ EHLLAPI settle หลัง Windows popup ปิด
-    SS.send("@1"); SS.wait()
-    SS.send("@1")
+    SS.pf(1); SS.wait()
+    SS.pf(1)
     if not SS.wait_for("MHT53201", WAIT_TIMEOUT):
         log.warning("_f1_to_mht53201: F1 ไม่กลับ MHT53201 — ตรวจจอ")
 
@@ -453,7 +468,7 @@ def _back_to_mht53201(max_tries=6):
         log.info("_back_to_mht53201: attempt %d — Reset + F1", i + 1)
         try:
             SS.reset(); SS.wait()
-            SS.send("@1"); SS.wait()   # F1 = Back บน terminal นี้
+            SS.pf(1); SS.wait()   # F1 = Back บน terminal นี้
         except Exception as e:
             log.warning("_back_to_mht53201: attempt %d error: %s", i + 1, e)
         time.sleep(0.5)
@@ -490,7 +505,10 @@ def process_record(record):
             SS.reset()
         except Exception:
             pass
-        mark_done(record["id"], "FAILED", str(e))
+        try:
+            mark_done(record["id"], "FAILED", str(e))
+        except Exception as db_e:
+            log.error("mark FAILED also failed: %s — id=%s ยังค้าง PENDING", db_e, record["id"])
         _back_to_mht53201()
 
 _had_pending = False
@@ -548,7 +566,13 @@ def main():
                 if not signed_in:
                     ensure_signed_in()
                     signed_in = True
-                poll()
+                scr = SS.read()
+                if "MHT53201" not in scr and "VENDOR CODE" not in scr:
+                    log.warning("ไม่อยู่บน MHT53201 — AS400 session timeout? — re-login")
+                    alog.warning("SESSION_TIMEOUT  screen=%s", scr[:40].strip())
+                    signed_in = False
+                else:
+                    poll()
         except KeyboardInterrupt:
             log.info("Stopped")
             alog.info("STOP   (KeyboardInterrupt)")
