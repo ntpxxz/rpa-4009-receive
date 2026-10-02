@@ -2,7 +2,8 @@ import os, sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from dotenv import load_dotenv; load_dotenv()
 import pyodbc
-cs = ("DRIVER={ODBC Driver 17 for SQL Server};"
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), "ODBC Driver 17 for SQL Server")
+cs = (f"DRIVER={{{_SQL_DRV}}};"
       f"SERVER={os.getenv('DB_SERVER','localhost')};"
       f"DATABASE={os.getenv('DB_NAME','')};"
       f"UID={os.getenv('DB_USER','')};"

@@ -167,8 +167,9 @@ def set_cursor_at_pos(ps_pos: int):
 
 # ── DB layer ───────────────────────────────────────────────────────────────────
 
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), "ODBC Driver 17 for SQL Server")
 _CONN_STR = (
-    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"DRIVER={{{_SQL_DRV}}};"
     f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
     f"UID={DB_USER};PWD={DB_PASSWORD}"
 )

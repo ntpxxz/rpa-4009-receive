@@ -84,7 +84,8 @@ CONFIRM_TIMEOUT_SEC          = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
 
 
 # ─── DB (เหมือน as400-rpa.py) ─────────────────────────────────────────────────
-_DB_CONN_STR = (f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), "ODBC Driver 17 for SQL Server")
+_DB_CONN_STR = (f"DRIVER={{{_SQL_DRV}}};"
                 f"SERVER={DB_SERVER};DATABASE={DB_NAME};UID={DB_USER};PWD={DB_PASSWORD}")
 
 _db_conn       = None
@@ -118,14 +119,14 @@ def fetch_pending():
     conn = _get_db()
     rows = conn.execute(
         "SELECT q.id, q.VENDOR_CODE, q.MATLOT, q.ITEM_NO, q.STOCK_QTY, q.VENDOR_NAME, "
-        "       vs.shortname "
+        "       vs.shortname, q.doNo "
         "FROM as400_queue q "
         "LEFT JOIN vendor_shortname vs ON vs.vendor_code = q.VENDOR_CODE "
         "WHERE q.status = 'PENDING' ORDER BY q.created_at, q.id"
     ).fetchall()
     return [{"id": r[0], "VENDOR_CODE": r[1] or "", "MATLOT": r[2] or "",
              "ITEM_NO": r[3] or "", "STOCK_QTY": r[4] or 0, "VENDOR_NAME": r[5] or "",
-             "shortname": r[6] or ""}
+             "shortname": r[6] or "", "doNo": r[7] or ""}
             for r in rows]
 
 def mark_done(record_id, status, error=None):
@@ -322,17 +323,28 @@ def screen_mht53205_barcode_entry():
     if not SS.wait_for("MHT53201", WAIT_TIMEOUT):
         raise ValueError("MHT53205: ไม่ขึ้นหน้า MHT53201 — ตรวจ OPT column (MHT53205_OPT_COL)")
 
-# ─── Screen 1: MHT53201 — กรอก vendor code ────────────────────────────────────
-def screen_mht53201_input_vendor(vendor_code):
+# ─── Screen 1: MHT53201 — กรอก vendor code + invoice ──────────────────────────
+def screen_mht53201_input_vendor(vendor_code, do_no):
     pos = SS.find("VENDOR CODE")
     if not pos:
         raise ValueError("MHT53201: หา label 'VENDOR CODE' ไม่เจอ — ไม่อยู่หน้า MHT53201?")
     row, col = pos
-    SS.put(row, col, str(vendor_code))   # goto input field ในแถวนั้น + ล้าง + พิมพ์
+    SS.put(row, col, str(vendor_code))
     SS.enter()
     log.info("→ MHT53201: vendor=%s", vendor_code)
     if not SS.wait_for("TAX INV", WAIT_TIMEOUT):
-        raise ValueError("MHT53201: กรอก vendor แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
+        raise ValueError("MHT53201: กรอก vendor แล้วไม่ขึ้นหน้า invoice input")
+    if not do_no:
+        raise ValueError("MHT53201: record ไม่มี doNo")
+    pos = SS.find("TAX INV")   # ปรับ label ให้ตรงกับจอจริงถ้าต่างกัน
+    if not pos:
+        raise ValueError("MHT53201: หา field 'TAX INV' ไม่เจอบนหน้า invoice input")
+    row, col = pos
+    SS.put(row, col, str(do_no))
+    SS.enter()
+    log.info("→ MHT53201: doNo=%s", do_no)
+    if not SS.wait_for("TAX INV.NO", WAIT_TIMEOUT):
+        raise ValueError("MHT53201: กรอก invoice แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
 
 # ─── Screen 2: MHT53202 — เลือก D/O ที่ TAX INV.NO == MATLOT ───────────────────
 MHT53202_MAX_PAGES = 10  # ponytail: upper bound; raise if vendor has huge D/O lists
@@ -475,7 +487,7 @@ class DryRunStop(Exception):
 def input_to_as400(record):
     if not record.get("VENDOR_CODE"):
         raise ValueError("record ไม่มี VENDOR_CODE")
-    screen_mht53201_input_vendor(record["VENDOR_CODE"])
+    screen_mht53201_input_vendor(record["VENDOR_CODE"], record.get("doNo", ""))
     screen_mht53202_select_do(record.get("MATLOT", ""))
     screen_dht53203_accept_do(record)
     screen_dtn07122_confirm(record)

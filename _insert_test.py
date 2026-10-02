@@ -1,6 +1,7 @@
 import pyodbc
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), "ODBC Driver 17 for SQL Server")
 con = pyodbc.connect(
-    "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;DATABASE=Warehouse_F5;UID=DATALYZER;PWD=NMB54321",
+    f"DRIVER={{{_SQL_DRV}}};SERVER=localhost;DATABASE=Warehouse_F5;UID=DATALYZER;PWD=NMB54321",
     timeout=5
 )
 cur = con.cursor()

@@ -78,6 +78,7 @@ CREATE TABLE as400_queue (
     ITEM_NO     NVARCHAR(50),
     STOCK_QTY   DECIMAL(18,3),
     VENDOR_NAME NVARCHAR(200) NULL,
+    doNo        NVARCHAR(100) NULL,               -- TAX invoice no. กรอกหน้า invoice input (หลัง vendor code)
     status      NVARCHAR(20)  DEFAULT 'PENDING',  -- PENDING / SENT / FAILED / AWAITING_CONFIRM / CONFIRMED
     screenshot  NVARCHAR(MAX) NULL,               -- screen text เมื่อ AWAITING_CONFIRM
     error       NVARCHAR(MAX) NULL,
