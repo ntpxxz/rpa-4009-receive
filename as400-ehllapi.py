@@ -37,7 +37,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
 AS400_SESSION         = os.getenv("AS400_SESSION_ID", "A")  # EHLLAPI short session id
 DLL_DIR               = os.getenv("AS400_DLL_DIR",
-                                   r"C:\Program Files (x86)\IBM\Client Access\Emulator")
+                                   r"C:\Users\bptj825\Desktop\PBFD5YD1 A35BP.lnk")
 CONFIRM_TIMEOUT_SEC   = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
 DTN07122_CONFIRM_MODE = os.getenv("DTN07122_CONFIRM_MODE", "false").lower() == "true"
 DTN07122_DRY_RUN      = os.getenv("DTN07122_DRY_RUN", "false").lower() == "true"

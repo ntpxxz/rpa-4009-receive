@@ -58,7 +58,7 @@ PBASMT_CHECK_PASS   = os.getenv("PBASMT_CHECK_PASS", "")
 PBASMT_SECTION_CODE = os.getenv("PBASMT_SECTION_CODE", "71DM")  # ponytail: fixed value, override via .env if needed
 SKIP_LOGIN = os.getenv("SKIP_LOGIN", "false").lower() == "true"
 
-PCOMM_EXE        = os.getenv("PCOMM_EXE", r"C:\Program Files (x86)\IBM\Client Access\Emulator\pcsws.exe")
+PCOMM_EXE        = os.getenv("PCOMM_EXE", r"C:\Users\bptj825\Desktop\PBFD5YD1 A35BP.lnk")
 PCOMM_ARGS       = os.getenv("PCOMM_ARGS", "").split()  # args ต่อท้าย pcsws.exe เช่น "PBFD5YD1 A35BP"
 PCOMM_START_WAIT = int(os.getenv("PCOMM_START_WAIT", "15"))  # seconds to wait for session after launch
 
@@ -166,9 +166,13 @@ def launch_terminal():
     if not os.path.exists(PCOMM_EXE):
         log.error("ไม่พบ PCOMM_EXE=%s — เปิด PC5250 เองก่อนรัน", PCOMM_EXE)
         return
-    cmd = [PCOMM_EXE] + PCOMM_ARGS
-    log.info("เปิด PC5250: %s", " ".join(cmd))
-    subprocess.Popen(cmd)
+    if PCOMM_EXE.lower().endswith(".lnk"):
+        log.info("เปิด PC5250: %s", PCOMM_EXE)
+        os.startfile(PCOMM_EXE)
+    else:
+        cmd = [PCOMM_EXE] + PCOMM_ARGS
+        log.info("เปิด PC5250: %s", " ".join(cmd))
+        subprocess.Popen(cmd)
     for _ in range(PCOMM_START_WAIT * 2):
         time.sleep(0.5)
         if connect_session():
@@ -187,18 +191,26 @@ def _verify_on_screen(record, keys=("VENDOR_CODE", "MATLOT", "ITEM_NO"), screen=
                          f"item={record.get('ITEM_NO')})")
 
 # ─── Login / menu ─────────────────────────────────────────────────────────────
+def _dismiss_program_messages():
+    if SS.wait_for("Display Program Messages", timeout=2.0):
+        SS.enter()
+        log.info("→ dismissed 'Display Program Messages'")
+        SS.wait()
+
 def ensure_signed_in():
     if SKIP_LOGIN:
         log.info("SKIP_LOGIN=true — เริ่มจากหน้าจอปัจจุบัน")
         return
     screen_signon()
+    _dismiss_program_messages()
     screen_pbasmt_login()
     navigate_menu()
     screen_password_check()
     screen_mht53205_barcode_entry()
 
 def screen_signon():
-    if not SS.contains("Sign On"):
+    if not SS.wait_for("Sign On", timeout=WAIT_TIMEOUT):
+        log.warning("→ Sign On: ไม่พบหน้า Sign On ใน %.0fs\n%s", WAIT_TIMEOUT, SS.read())
         return
     if not (AS400_USER and AS400_PASS):
         log.warning("→ Sign On: ไม่มี AS400_USER/PASS ใน .env — ข้าม")
@@ -213,9 +225,16 @@ def screen_pbasmt_login():
     if not (PBASMT_USER and PBASMT_PASS):
         log.warning("→ PBASMT: ไม่มี PBASMT_USER/PASS ใน .env — ข้าม")
         return
-    SS.send(PBASMT_USER); SS.tab(); SS.send(PBASMT_PASS); SS.enter()
+    for _ in range(20):          # poll ไม่ส่ง @R — transition-inhibit ต้องรอให้ host ปลดเอง
+        if SS.wait() == 0:
+            break
+        time.sleep(0.5)
+    SS.send(f"{PBASMT_USER}@T{PBASMT_PASS}@E")
     log.info("→ PBASMT: %s", PBASMT_USER)
-    SS.wait()
+    time.sleep(0.005)
+    SS.enter()
+    if not SS.wait_for("TPBAS00W1", timeout=WAIT_TIMEOUT):
+        log.warning("→ PBASMT: หน้า TPBAS00W1 ไม่ปรากฏใน %.0fs\n%s", WAIT_TIMEOUT, SS.read())
 
 def navigate_menu():
     if not AS400_MENU_OPTION:
@@ -224,9 +243,19 @@ def navigate_menu():
         log.warning("→ Menu: ไม่พบ TPBAS00W1 บนหน้าจอ — ข้าม")
         return
     for step in filter(None, AS400_MENU_OPTION.split("-")):
+        prev = SS.read()
         SS.send(step); SS.enter()
         log.info("→ Menu: %s", step)
-        SS.wait()
+        deadline = time.time() + WAIT_TIMEOUT
+        while time.time() < deadline:
+            SS.wait()
+            if SS.contains("Display Program Messages"):
+                log.info("→ Menu: dismiss system message")
+                SS.enter()
+                prev = ""   # force loop to see next screen as "changed"
+            if SS.read() != prev:
+                break
+            time.sleep(0.2)
 
 def screen_password_check():
     if not SS.contains("XDP05001"):
@@ -493,6 +522,22 @@ def main():
     log.info("=" * 56)
     alog.info("START  session=%s db=%s/%s skip_login=%s dry_run=%s confirm_mode=%s",
               SESSION_ID, DB_SERVER, DB_NAME, SKIP_LOGIN, DTN07122_DRY_RUN, DTN07122_CONFIRM_MODE)
+    # 1. Connect DB ก่อน — retry จนสำเร็จ
+    while True:
+        try:
+            _get_db()
+            ctypes.windll.user32.MessageBoxTimeoutW(
+                0, f"เชื่อมต่อฐานข้อมูลสำเร็จ\n{DB_SERVER} / {DB_NAME}  user={DB_USER}",
+                "DB Connected", 0x40040, 0, 5000)  # MB_ICONINFORMATION|MB_TOPMOST, 5s
+            break
+        except Exception as e:
+            ctypes.windll.user32.MessageBoxTimeoutW(
+                0, f"เชื่อมต่อล้มเหลว\n{DB_SERVER} / {DB_NAME}\n\n{e}",
+                "DB Connect Failed — Retry", 0x10040, 0, 5000)  # MB_ICONERROR|MB_TOPMOST, 5s
+            log.error("DB connect failed — retry in %ds", POLL_INTERVAL)
+            time.sleep(POLL_INTERVAL)
+
+    # 2. Launch terminal + login
     launch_terminal()
     signed_in = False
     while True:
