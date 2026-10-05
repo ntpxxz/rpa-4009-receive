@@ -84,7 +84,17 @@ CONFIRM_TIMEOUT_SEC          = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
 
 
 # ─── DB (เหมือน as400-rpa.py) ─────────────────────────────────────────────────
-_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), "ODBC Driver 17 for SQL Server")
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), None)
+if _SQL_DRV is None:
+    ctypes.windll.user32.MessageBoxW(
+        0,
+        "ไม่พบ ODBC Driver for SQL Server (32-bit) บนเครื่องนี้\n\n"
+        "กรุณาติดตั้ง:\n"
+        "  ODBC Driver 17 for SQL Server\n"
+        "  https://aka.ms/downloadmsodbcsql\n\n"
+        f"Drivers ที่พบ: {pyodbc.drivers() or '(ไม่มี)'}",
+        "ODBC Driver Not Found", 0x10)
+    sys.exit(1)
 _DB_CONN_STR = (f"DRIVER={{{_SQL_DRV}}};"
                 f"SERVER={DB_SERVER};DATABASE={DB_NAME};UID={DB_USER};PWD={DB_PASSWORD}")
 

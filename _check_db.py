@@ -9,8 +9,15 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
+_SQL_DRV = next((d for d in sorted(pyodbc.drivers(), reverse=True) if "SQL Server" in d), None)
+if _SQL_DRV is None:
+    print("[ERROR] ไม่พบ ODBC Driver for SQL Server บนเครื่องนี้")
+    print("  กรุณาติดตั้ง (32-bit): https://aka.ms/downloadmsodbcsql")
+    print(f"  drivers ที่พบ: {pyodbc.drivers() or '(ไม่มี)'}")
+    sys.exit(1)
+
 conn_str = (
-    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"DRIVER={{{_SQL_DRV}}};"
     f"SERVER={os.getenv('DB_SERVER','localhost')};"
     f"DATABASE={os.getenv('DB_NAME','')};"
     f"UID={os.getenv('DB_USER','')};"
