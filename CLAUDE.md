@@ -38,7 +38,7 @@ while True:
 ```
 
 **4-screen flow per record** (`input_to_as400`):
-1. `screen_mht53201_input_vendor` — `SS.find("VENDOR CODE")` → `SS.put(row, col, vendor)` → Enter
+1. `screen_mht53201_input_vendor` — `SS.find("VENDOR CODE")` → `SS.put(row, col, vendor)` → Enter → TAX INV เว้นว่าง → Enter
 2. `screen_mht53202_select_do` — `SS.find(doNo)` (PF8 ถ้าไม่เจอ) → `SS.put(row, OPT_COL, "1")` → Enter
 3. `screen_dht53203_accept_do` — verify exact + `SS.send("A")` → Enter × 2
 4. `screen_dtn07122_confirm` — verify → fill W/H=I LOC=S1 S/C=2 VENDOR MATLOT shortname → Enter × 2
@@ -80,7 +80,7 @@ CREATE TABLE as400_queue (
     ITEM_NO     NVARCHAR(50),
     STOCK_QTY   DECIMAL(18,3),
     VENDOR_NAME NVARCHAR(200) NULL,
-    doNo        NVARCHAR(100) NULL,               -- TAX invoice no. กรอกหน้า invoice input (หลัง vendor code)
+    doNo        NVARCHAR(100) NULL,               -- D/O no. ใช้ match คอลัมน์ D/O บนหน้า MHT53202
     status      NVARCHAR(20)  DEFAULT 'PENDING',  -- PENDING / SENT / FAILED / AWAITING_CONFIRM / CONFIRMED
     screenshot  NVARCHAR(MAX) NULL,               -- screen text เมื่อ AWAITING_CONFIRM
     error       NVARCHAR(MAX) NULL,

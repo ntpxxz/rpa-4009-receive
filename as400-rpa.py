@@ -356,7 +356,7 @@ def screen_mht53205_barcode_entry():
         raise ValueError("MHT53205: ไม่ขึ้นหน้า MHT53201 — ตรวจ OPT column (MHT53205_OPT_COL)")
 
 # ─── Screen 1: MHT53201 — กรอก vendor code + invoice ──────────────────────────
-def screen_mht53201_input_vendor(vendor_code, do_no):
+def screen_mht53201_input_vendor(vendor_code):
     pos = SS.find("VENDOR CODE")
     if not pos:
         raise ValueError("MHT53201: หา label 'VENDOR CODE' ไม่เจอ — ไม่อยู่หน้า MHT53201?")
@@ -366,41 +366,33 @@ def screen_mht53201_input_vendor(vendor_code, do_no):
     log.info("→ MHT53201: vendor=%s", vendor_code)
     if not SS.wait_for("TAX INV", WAIT_TIMEOUT):
         raise ValueError("MHT53201: กรอก vendor แล้วไม่ขึ้นหน้า invoice input")
-    if not do_no:
-        raise ValueError("MHT53201: record ไม่มี doNo")
-    pos = SS.find("TAX INV")   # ปรับ label ให้ตรงกับจอจริงถ้าต่างกัน
-    if not pos:
-        raise ValueError("MHT53201: หา field 'TAX INV' ไม่เจอบนหน้า invoice input")
-    row, col = pos
-    SS.put(row, col, str(do_no))
-    SS.enter()
-    log.info("→ MHT53201: doNo=%s", do_no)
-    if not SS.wait_for("TAX INV.NO", WAIT_TIMEOUT):
-        raise ValueError("MHT53201: กรอก invoice แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
+    SS.enter()   # ช่อง TAX INV เว้นว่าง — ไป D/O list เลย
+    if not SS.wait_for("MHT53202", WAIT_TIMEOUT):
+        raise ValueError("MHT53201: Enter ที่ invoice input แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
 
-# ─── Screen 2: MHT53202 — เลือก D/O ที่ TAX INV.NO == doNo ─────────────────────
+# ─── Screen 2: MHT53202 — เลือกแถวที่ D/O == doNo ─────────────────────────────
 MHT53202_MAX_PAGES = 10  # ponytail: upper bound; raise if vendor has huge D/O lists
 
-def screen_mht53202_select_do(tax_inv_no):
-    if not tax_inv_no:
+def screen_mht53202_select_do(do_no):
+    if not do_no:
         raise ValueError("MHT53202: record ไม่มี doNo")
     pos = None
     for page in range(MHT53202_MAX_PAGES):
         screen = SS.read()
-        pos = SS.find(tax_inv_no, s=screen)
+        pos = SS.find(do_no, s=screen)
         if pos:
             break
-        log.info("→ MHT53202: ไม่เจอ %s หน้า %d — PF8 ดูหน้าถัดไป", tax_inv_no, page + 1)
+        log.info("→ MHT53202: ไม่เจอ D/O %s หน้า %d — PF8 ดูหน้าถัดไป", do_no, page + 1)
         SS.pf(8); SS.wait()   # PF8 = Page Forward on MHT53202
         if SS.read() == screen:   # จอไม่เปลี่ยน = หน้าสุดท้ายแล้ว
             break
     if not pos:
         log.warning("MHT53202 screen:\n%s", "\n".join(SS.lines()))
-        raise ValueError(f"MHT53202: หา D/O ที่ TAX INV.NO={tax_inv_no} ไม่เจอ ({page + 1} หน้า, หมด list)")
+        raise ValueError(f"MHT53202: หา D/O={do_no} ไม่เจอ ({page + 1} หน้า, หมด list)")
     row, _ = pos
     SS.put(row, MHT53202_OPT_COL, "1")   # OPT ของแถวนั้น = 1 (accept)
     SS.enter()
-    log.info("→ MHT53202: เลือกแถว %d (TAX INV.NO=%s)", row, tax_inv_no)
+    log.info("→ MHT53202: เลือกแถว %d (D/O=%s)", row, do_no)
     if not SS.wait_for("JUDGEMENT", WAIT_TIMEOUT):
         raise ValueError("MHT53202: เลือก D/O แล้วไม่ขึ้นหน้า DHT53203")
 
@@ -528,7 +520,7 @@ class DryRunStop(Exception):
 def input_to_as400(record):
     if not record.get("VENDOR_CODE"):
         raise ValueError("record ไม่มี VENDOR_CODE")
-    screen_mht53201_input_vendor(record["VENDOR_CODE"], record.get("doNo", ""))
+    screen_mht53201_input_vendor(record["VENDOR_CODE"])
     screen_mht53202_select_do(record.get("doNo", ""))
     screen_dht53203_accept_do(record)
     screen_dtn07122_confirm(record)
