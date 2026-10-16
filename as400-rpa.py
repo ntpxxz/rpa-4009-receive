@@ -364,11 +364,8 @@ def screen_mht53201_input_vendor(vendor_code):
     SS.put(row, col, str(vendor_code))
     SS.enter()
     log.info("→ MHT53201: vendor=%s", vendor_code)
-    if not SS.wait_for("TAX INV", WAIT_TIMEOUT):
-        raise ValueError("MHT53201: กรอก vendor แล้วไม่ขึ้นหน้า invoice input")
-    SS.enter()   # ช่อง TAX INV เว้นว่าง — ไป D/O list เลย
-    if not SS.wait_for("MHT53202", WAIT_TIMEOUT):
-        raise ValueError("MHT53201: Enter ที่ invoice input แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
+    if not SS.wait_for("TAX INV", WAIT_TIMEOUT):   # หัวคอลัมน์บน D/O list
+        raise ValueError("MHT53201: กรอก vendor แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
 
 # ─── Screen 2: MHT53202 — เลือกแถวที่ D/O == doNo ─────────────────────────────
 MHT53202_MAX_PAGES = 10  # ponytail: upper bound; raise if vendor has huge D/O lists
@@ -387,7 +384,6 @@ def screen_mht53202_select_do(do_no):
         if SS.read() == screen:   # จอไม่เปลี่ยน = หน้าสุดท้ายแล้ว
             break
     if not pos:
-        log.warning("MHT53202 screen:\n%s", "\n".join(SS.lines()))
         raise ValueError(f"MHT53202: หา D/O={do_no} ไม่เจอ ({page + 1} หน้า, หมด list)")
     row, _ = pos
     SS.put(row, MHT53202_OPT_COL, "1")   # OPT ของแถวนั้น = 1 (accept)
@@ -581,6 +577,10 @@ def process_record(record):
                   record["id"], label, record.get("ITEM_NO"), e, elapsed)
         alog.error("FAIL   id=%-4s vendor=%-8s item=%-15s matlot=%-15s error=%s  %.1fs",
                    record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), e, elapsed)
+        try:
+            log.warning("screen at FAIL:\n%s", "\n".join(SS.lines()))
+        except Exception:
+            pass
         try:
             SS.reset()
         except Exception:
