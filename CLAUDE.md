@@ -39,7 +39,7 @@ while True:
 
 **4-screen flow per record** (`input_to_as400`):
 1. `screen_mht53201_input_vendor` — `SS.find("VENDOR CODE")` → `SS.put(row, col, vendor)` → Enter
-2. `screen_mht53202_select_do` — `SS.find(matlot)` (PF8 ถ้าไม่เจอ) → `SS.put(row, OPT_COL, "1")` → Enter
+2. `screen_mht53202_select_do` — `SS.find(doNo)` (PF8 ถ้าไม่เจอ) → `SS.put(row, OPT_COL, "1")` → Enter
 3. `screen_dht53203_accept_do` — verify exact + `SS.send("A")` → Enter × 2
 4. `screen_dtn07122_confirm` — verify → fill W/H=I LOC=S1 S/C=2 VENDOR MATLOT shortname → Enter × 2
 
@@ -67,6 +67,8 @@ while True:
 | `DTN07122_DRY_RUN` | `false` | `true` = ข้าม Enter สุดท้าย (ไม่ submit) |
 | `DTN07122_CONFIRM_MODE` | `false` | `true` = รอ operator ยืนยันผ่าน DB ก่อน submit |
 | `CONFIRM_TIMEOUT_SEC` | `120` | timeout รอ operator |
+| `NOTIFY_URL` | `""` | webhook URL แจ้งเตือน mobile ก่อน confirm — ntfy.sh: `https://ntfy.sh/TOPIC`, LINE Notify: `https://notify-api.line.me/api/notify` |
+| `NOTIFY_TOKEN` | `""` | Bearer token (LINE Notify token / ntfy private topic token) |
 
 ## DB schema
 

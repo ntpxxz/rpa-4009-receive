@@ -12,7 +12,7 @@ AS400 RPA — EHLLAPI version (พอร์ตจาก as400-rpa.py)
 ฟิลด์ที่ยังต้องจูนกับจอจริง (ตั้งใน .env, เป็น row/col เสถียรกว่า pixel/tab เดิม):
    DTN07122_KGS_TO_VNAME_GAP, MHT53202_OPT_COL
 """
-import os, sys, time, logging, logging.handlers, subprocess, threading, pyodbc, ctypes
+import os, sys, time, logging, logging.handlers, subprocess, threading, pyodbc, ctypes, urllib.request, urllib.parse
 from dotenv import load_dotenv
 
 try:
@@ -81,6 +81,8 @@ DTN07122_REVIEW_PAUSE        = float(os.getenv("DTN07122_REVIEW_PAUSE", "0"))
 DTN07122_DRY_RUN             = os.getenv("DTN07122_DRY_RUN", "false").lower() == "true"
 DTN07122_CONFIRM_MODE        = True  # ponytail: always on — operator must confirm before every submit
 CONFIRM_TIMEOUT_SEC          = int(os.getenv("CONFIRM_TIMEOUT_SEC", "120"))
+NOTIFY_URL                   = os.getenv("NOTIFY_URL", "")   # ntfy.sh/TOPIC or LINE notify or any webhook
+NOTIFY_TOKEN                 = os.getenv("NOTIFY_TOKEN", "") # Bearer token (LINE Notify / ntfy private topic)
 
 
 # ─── DB (เหมือน as400-rpa.py) ─────────────────────────────────────────────────
@@ -155,6 +157,26 @@ def get_queue_status(record_id):
     conn = _get_db()
     row = conn.execute("SELECT status FROM as400_queue WHERE id=?", record_id).fetchone()
     return row[0] if row else "FAILED"
+
+def _notify_web(msg: str):
+    if not NOTIFY_URL:
+        return
+    try:
+        # LINE Notify needs form-encoded body; ntfy.sh / generic webhooks take raw text
+        is_line = "notify-api.line.me" in NOTIFY_URL
+        if is_line:
+            body = urllib.parse.urlencode({"message": msg}).encode()
+            ct   = "application/x-www-form-urlencoded"
+        else:
+            body = msg.encode()
+            ct   = "text/plain; charset=utf-8"
+        req = urllib.request.Request(NOTIFY_URL, data=body,
+                                     headers={"Content-Type": ct,
+                                              **({"Authorization": f"Bearer {NOTIFY_TOKEN}"} if NOTIFY_TOKEN else {})})
+        urllib.request.urlopen(req, timeout=10)
+        log.info("notify_web: sent to %s", NOTIFY_URL)
+    except Exception as e:
+        log.warning("notify_web: failed — %s", e)
 
 # ─── EHLLAPI session (global) ─────────────────────────────────────────────────
 SS = None        # ehllapi.Session
@@ -356,21 +378,25 @@ def screen_mht53201_input_vendor(vendor_code, do_no):
     if not SS.wait_for("TAX INV.NO", WAIT_TIMEOUT):
         raise ValueError("MHT53201: กรอก invoice แล้วไม่ขึ้นหน้า D/O list (MHT53202)")
 
-# ─── Screen 2: MHT53202 — เลือก D/O ที่ TAX INV.NO == MATLOT ───────────────────
+# ─── Screen 2: MHT53202 — เลือก D/O ที่ TAX INV.NO == doNo ─────────────────────
 MHT53202_MAX_PAGES = 10  # ponytail: upper bound; raise if vendor has huge D/O lists
 
 def screen_mht53202_select_do(tax_inv_no):
     if not tax_inv_no:
-        raise ValueError("MHT53202: record ไม่มี MATLOT")
+        raise ValueError("MHT53202: record ไม่มี doNo")
     pos = None
     for page in range(MHT53202_MAX_PAGES):
-        pos = SS.find(tax_inv_no)
+        screen = SS.read()
+        pos = SS.find(tax_inv_no, s=screen)
         if pos:
             break
         log.info("→ MHT53202: ไม่เจอ %s หน้า %d — PF8 ดูหน้าถัดไป", tax_inv_no, page + 1)
         SS.pf(8); SS.wait()   # PF8 = Page Forward on MHT53202
+        if SS.read() == screen:   # จอไม่เปลี่ยน = หน้าสุดท้ายแล้ว
+            break
     if not pos:
-        raise ValueError(f"MHT53202: หา D/O ที่ TAX INV.NO={tax_inv_no} ไม่เจอใน {MHT53202_MAX_PAGES} หน้า")
+        log.warning("MHT53202 screen:\n%s", "\n".join(SS.lines()))
+        raise ValueError(f"MHT53202: หา D/O ที่ TAX INV.NO={tax_inv_no} ไม่เจอ ({page + 1} หน้า, หมด list)")
     row, _ = pos
     SS.put(row, MHT53202_OPT_COL, "1")   # OPT ของแถวนั้น = 1 (accept)
     SS.enter()
@@ -436,6 +462,11 @@ def screen_dtn07122_confirm(record):
         screen_text = "\n".join(s[i*SS.cols:(i+1)*SS.cols] for i in range(SS.rows))
         log.info("→ DTN07122: CONFIRM_MODE — set AWAITING_CONFIRM, รอ operator (%ds)", CONFIRM_TIMEOUT_SEC)
         mark_awaiting_confirm(record["id"], screen_text)
+        _notify_web(
+            f"[AS400 RPA] รอยืนยัน id={record['id']}\n"
+            f"VENDOR: {record.get('VENDOR_CODE','')}  MATLOT: {record.get('MATLOT','')}\n"
+            f"ITEM: {record.get('ITEM_NO','')}  QTY: {record.get('STOCK_QTY','')}"
+        )
 
         deadline = time.time() + CONFIRM_TIMEOUT_SEC
         while time.time() < deadline:
@@ -498,7 +529,7 @@ def input_to_as400(record):
     if not record.get("VENDOR_CODE"):
         raise ValueError("record ไม่มี VENDOR_CODE")
     screen_mht53201_input_vendor(record["VENDOR_CODE"], record.get("doNo", ""))
-    screen_mht53202_select_do(record.get("MATLOT", ""))
+    screen_mht53202_select_do(record.get("doNo", ""))
     screen_dht53203_accept_do(record)
     screen_dtn07122_confirm(record)
     log.info("→ done: vendor=%s item=%s", record["VENDOR_CODE"], record.get("ITEM_NO"))
@@ -568,19 +599,21 @@ def process_record(record):
             log.error("mark FAILED also failed: %s — id=%s ยังค้าง PENDING", db_e, record["id"])
         _back_to_mht53201()
 
-_had_pending = False
+_warned_empty = False
 
 def poll():
-    global _had_pending
+    global _warned_empty
     pending = fetch_pending()
     if not pending:
-        if _had_pending:
-            log.info("Queue empty")
-            _had_pending = False
+        if not _warned_empty:
+            log.info("Queue empty — ไม่มี PENDING บนหน้า MHT53201")
+            _warned_empty = True
             _update_tray_tip("AS400 RPA — Idle")
+            threading.Thread(target=ctypes.windll.user32.MessageBoxW,
+                             args=(0, "ไม่มีรายการ Pending ในคิว", "AS400 RPA — Queue Empty", 0x40040),
+                             daemon=True).start()  # MB_OK|MB_ICONWARNING|MB_TOPMOST
         return
-    if not _had_pending:
-        _had_pending = True
+    _warned_empty = False  # มี record ใหม่ → reset ให้ warn อีกครั้งเมื่อคิวหมด
     log.info("Queue: %d pending", len(pending))
     for i, record in enumerate(pending, 1):
         log.info("─── %d/%d ─────────────────────────────", i, len(pending))
