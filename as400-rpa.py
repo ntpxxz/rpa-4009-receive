@@ -426,19 +426,21 @@ def screen_dtn07122_confirm(record):
             raise ValueError(f"DTN07122: หา header {sub!r} บนแถวไม่เจอ")
         return c + 1                  # 1-based
 
-    SS.put(vr, col("W/H"),  "I")
-    SS.put(vr, col("LOC"),  "S1")
-    SS.put(vr, col("S/C"),  "2")
-    SS.put(vr, col("VENDOR"), str(record.get("VENDOR_CODE", "")))
-    SS.put(vr, col("MATL"), str(record.get("MATLOT", "")))
-    
     short_name = str(record.get("shortname", "")).strip()
-    if short_name:
-        SS.tab(); SS.tab()
-        SS.send(short_name)
-        
-    log.info("→ DTN07122: W/H=I LOC=S1 S/C=2 vendor=%s matlot=%s shortname=%s",
-             record.get("VENDOR_CODE"), record.get("MATLOT"), short_name)
+    if not short_name:
+        raise ValueError(f"DTN07122: ไม่มี shortname ของ vendor {record.get('VENDOR_CODE')} ใน vendor_shortname")
+    invoice_no = str(record.get("doNo", "")).strip()
+    if not invoice_no:
+        raise ValueError("DTN07122: record ไม่มี doNo (INVOICE NO.) สำหรับ MATL LOT")
+
+    SS.put(vr, col("W/H"),  "I")
+    # ponytail: LOC เว้นว่าง (ไม่กรอก S1)
+    SS.put(vr, col("S/C"),  "2")
+    SS.put(vr, col("VENDOR"), short_name)
+    SS.put(vr, col("MATL"), invoice_no)
+
+    log.info("→ DTN07122: W/H=I LOC=(blank) S/C=2 vendor=%s matlot(invoice)=%s",
+             short_name, invoice_no)
 
     if DTN07122_STOP_BEFORE_CONFIRM:
         raise DryRunStop("DTN07122: กรอกครบแล้ว หยุดก่อน Enter ยืนยัน — ตรวจ field บนจอ")
@@ -488,13 +490,12 @@ def screen_dtn07122_confirm(record):
 
     msg = (
         f"ข้อมูลถูกต้อง — ยืนยัน Submit?\n\n"
-        f"  VENDOR   : {record.get('VENDOR_CODE', '')}"
-        f"{f'  ({short_name})' if short_name else ''}\n"
-        f"  MATLOT   : {record.get('MATLOT', '')}\n"
+        f"  VENDOR   : {short_name}  ({record.get('VENDOR_CODE', '')})\n"
+        f"  MATL LOT : {invoice_no}  (INVOICE NO.)\n"
         f"  ITEM     : {record.get('ITEM_NO', '')}\n"
         f"  QTY      : {record.get('STOCK_QTY', '')}\n\n"
         f"  W/H      : I\n"
-        f"  LOC      : S1\n"
+        f"  LOC      : (blank)\n"
         f"  S/C      : 2"
     )
     ok = ctypes.windll.user32.MessageBoxW(0, msg, "ยืนยัน Stock-In", 0x44004) == 6  # ponytail: MB_YESNO|MB_ICONQUESTION|MB_TOPMOST, IDYES=6
@@ -551,7 +552,21 @@ def _back_to_mht53201(max_tries=6):
     log.warning("_back_to_mht53201: ไม่กลับ MHT53201 หลัง %d ครั้ง — ต้องนำทางเอง", max_tries)
     return False
 
+MAX_CONSECUTIVE_FAILS = int(os.getenv("MAX_CONSECUTIVE_FAILS", "3"))
+_fail_streak = 0
+
+def _stop_on_fail_streak():
+    """FAIL ติดกันครบ MAX_CONSECUTIVE_FAILS → แจ้ง operator แล้วปิดโปรแกรม"""
+    log.critical("FAIL ติดกัน %d ครั้ง — ปิดโปรแกรม", _fail_streak)
+    ctypes.windll.user32.MessageBoxW(
+        0, f"ป้อนข้อมูลผิดพลาดติดกัน {_fail_streak} ครั้ง\nปิดโปรแกรม — ตรวจ log / จอ AS400",
+        "AS400 RPA — Stopped", 0x40010)  # MB_OK|MB_ICONERROR|MB_TOPMOST
+    try: _remove_tray_icon()
+    except Exception: pass
+    os._exit(1)
+
 def process_record(record):
+    global _fail_streak
     label = record.get("shortname") or record.get("VENDOR_CODE", "?")
     log.info("► id=%-4s [%-8s] item=%-15s matlot=%s",
              record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"))
@@ -560,6 +575,7 @@ def process_record(record):
         input_to_as400(record)
         if not DTN07122_CONFIRM_MODE:
             mark_done(record["id"], "SENT")
+        _fail_streak = 0
         elapsed = time.time() - t0
         log.info("✓ SENT id=%-4s [%-8s] %s %s  (%.1fs)",
                  record["id"], label, record.get("ITEM_NO"), record.get("MATLOT"), elapsed)
@@ -590,6 +606,9 @@ def process_record(record):
         except Exception as db_e:
             log.error("mark FAILED also failed: %s — id=%s ยังค้าง PENDING", db_e, record["id"])
         _back_to_mht53201()
+        _fail_streak += 1
+        if _fail_streak >= MAX_CONSECUTIVE_FAILS:
+            _stop_on_fail_streak()
 
 _warned_empty = False
 
